@@ -14,27 +14,41 @@ This application replicates the manual ledger logic, including **P.F.L.R (Loan R
 
 # --- Sidebar: Initial Settings ---
 st.sidebar.header("Configuration")
+start_year = st.sidebar.number_input("Financial Year Start", value=2024, step=1)
 opening_balance_input = st.sidebar.number_input("Opening Balance (as of 1st April)", min_value=0.0, value=21880982.0, step=1000.0, format="%.2f")
 default_rate = st.sidebar.number_input("Default Interest Rate (% per annum)", min_value=0.0, value=7.1, step=0.1)
 
-# --- Main Data Entry ---
-st.subheader("Monthly Entries")
-st.info("Enter Deposits, P.F.L.R (Loan Recovery), and Withdrawals below.")
+# --- Helper: Generate Financial Year Months ---
+def get_fy_months(start_year):
+    # Generates ["Apr 2024", "May 2024", ... "Mar 2025"]
+    m_names = ["April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February", "March"]
+    fy_months = []
+    for i, m in enumerate(m_names):
+        y = start_year if i < 9 else start_year + 1
+        fy_months.append(f"{m} '{str(y)[-2:]}") # Format: April '24
+    return fy_months
 
-# Initialize the data structure for 12 months (Apr to Mar)
-months = ["APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "JAN", "FEB", "MAR"]
+months_list = get_fy_months(start_year)
+
+# --- Main Data Entry ---
+st.subheader(f"Monthly Entries ({start_year}-{start_year+1})")
+st.info("Enter Deposits, P.F.L.R (Loan Recovery), and Withdrawals below.")
 
 # Create a default dataframe for inputs
 if 'input_data' not in st.session_state:
+    # Initialize with zeros
     data = {
-        "Month": months,
+        "Month": months_list,
         "Dep_Before_15": [0.0] * 12,
+        "PFLR": [0.0] * 12,          # <--- PFLR Column
         "Dep_After_15": [0.0] * 12,
-        "PFLR": [0.0] * 12,  # <--- Added PFLR Column
         "Withdrawal": [0.0] * 12,
         "Rate": [default_rate] * 12
     }
     st.session_state.input_data = pd.DataFrame(data)
+else:
+    # Update month labels if year changes
+    st.session_state.input_data["Month"] = months_list
 
 # Data Editor
 edited_df = st.data_editor(
@@ -42,8 +56,8 @@ edited_df = st.data_editor(
     column_config={
         "Month": st.column_config.TextColumn("Month", disabled=True),
         "Dep_Before_15": st.column_config.NumberColumn("Deposit (Within 15th)", format="₹ %.2f"),
-        "Dep_After_15": st.column_config.NumberColumn("Deposit (After 15th)", format="₹ %.2f"),
         "PFLR": st.column_config.NumberColumn("P.F.L.R (Recovery)", format="₹ %.2f"), # <--- Configured PFLR
+        "Dep_After_15": st.column_config.NumberColumn("Deposit (After 15th)", format="₹ %.2f"),
         "Withdrawal": st.column_config.NumberColumn("Withdrawal", format="₹ %.2f"),
         "Rate": st.column_config.NumberColumn("Interest Rate (%)", format="%.2f")
     },
@@ -62,12 +76,13 @@ def calculate_ledger(opening_bal, input_df):
         month = row['Month']
         dep_before = row['Dep_Before_15']
         dep_after = row['Dep_After_15']
-        pflr = row['PFLR']  # <--- Get PFLR value
+        pflr = row['PFLR']
         withdrawal = row['Withdrawal']
         rate = row['Rate']
 
         # Logic: Lowest Balance for Interest = Opening + Dep (Before 15th) - Withdrawal
-        # Note: Based on the image, PFLR does NOT increase the Lowest Balance for the current month.
+        # CRITICAL: PFLR is treated as a deduction from salary (usually late/end of month effect for interest), 
+        # so it does NOT increase the Lowest Balance for the *current* month.
         lowest_bal_calc = current_bal + dep_before - withdrawal
         lowest_bal = max(0, lowest_bal_calc)
 
@@ -81,8 +96,8 @@ def calculate_ledger(opening_bal, input_df):
             "Month": month,
             "Opening Balance": current_bal,
             "Dep (<15th)": dep_before,
+            "PFLR": pflr,
             "Dep (>15th)": dep_after,
-            "PFLR": pflr, # <--- Added to results
             "Withdrawal": withdrawal,
             "Lowest Balance": lowest_bal,
             "Rate (%)": rate,
@@ -104,8 +119,8 @@ st.subheader("Calculation Result")
 st.dataframe(result_df.style.format({
     "Opening Balance": "₹ {:.2f}",
     "Dep (<15th)": "₹ {:.2f}",
-    "Dep (>15th)": "₹ {:.2f}",
     "PFLR": "₹ {:.2f}",
+    "Dep (>15th)": "₹ {:.2f}",
     "Withdrawal": "₹ {:.2f}",
     "Lowest Balance": "₹ {:.2f}",
     "Interest": "₹ {:.2f}",
@@ -130,7 +145,7 @@ def to_excel(df):
         workbook = writer.book
         worksheet = writer.sheets['PF_Ledger']
         format1 = workbook.add_format({'num_format': '₹ #,##0.00'})
-        worksheet.set_column('B:J', 18, format1) # Adjusted for extra column
+        worksheet.set_column('B:J', 18, format1) 
     processed_data = output.getvalue()
     return processed_data
 
@@ -154,19 +169,17 @@ class PDF(FPDF):
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-def to_pdf(df, final_bal, tot_int):
+def to_pdf(df, final_bal, tot_int, year_label):
     pdf = PDF(orientation='L') 
     pdf.add_page()
     pdf.set_font("Arial", size=9)
     
-    # Define Columns and Widths (Adjusted for PFLR)
-    # Month, Open, Dep<15, Dep>15, PFLR, With, Low, Rate, Int, Close
-    cols = ["Month", "Opening", "<15th", ">15th", "PFLR", "Withdr", "Lowest", "Rt", "Int", "Closing"]
-    # Map dataframe columns to short names for header
-    df_cols = df.columns.tolist() 
-    
-    # Widths (Total approx 275 for Landscape A4 safe area)
-    col_widths = [15, 30, 22, 22, 22, 22, 30, 12, 20, 30] 
+    # Header Info
+    pdf.cell(0, 10, f"Year: {year_label}-{year_label+1}", 0, 1, 'L')
+
+    # Define Columns: Month, Open, Dep<15, PFLR, Dep>15, With, Low, Rt, Int, Close
+    cols = ["Month", "Opening", "<15th", "PFLR", ">15th", "Withdr", "Lowest", "Rt", "Int", "Closing"]
+    col_widths = [20, 30, 20, 20, 20, 20, 30, 10, 15, 30] 
     
     # Table Header
     pdf.set_font("Arial", 'B', 8)
@@ -180,8 +193,8 @@ def to_pdf(df, final_bal, tot_int):
         pdf.cell(col_widths[0], 10, str(row['Month']), 1)
         pdf.cell(col_widths[1], 10, f"{row['Opening Balance']:.0f}", 1)
         pdf.cell(col_widths[2], 10, f"{row['Dep (<15th)']:.0f}", 1)
-        pdf.cell(col_widths[3], 10, f"{row['Dep (>15th)']:.0f}", 1)
-        pdf.cell(col_widths[4], 10, f"{row['PFLR']:.0f}", 1)  # <--- PFLR in PDF
+        pdf.cell(col_widths[3], 10, f"{row['PFLR']:.0f}", 1)
+        pdf.cell(col_widths[4], 10, f"{row['Dep (>15th)']:.0f}", 1)
         pdf.cell(col_widths[5], 10, f"{row['Withdrawal']:.0f}", 1)
         pdf.cell(col_widths[6], 10, f"{row['Lowest Balance']:.0f}", 1)
         pdf.cell(col_widths[7], 10, str(row['Rate (%)']), 1)
@@ -196,7 +209,7 @@ def to_pdf(df, final_bal, tot_int):
     
     return pdf.output(dest='S').encode('latin-1')
 
-pdf_data = to_pdf(result_df, final_balance_with_interest, total_yearly_interest)
+pdf_data = to_pdf(result_df, final_balance_with_interest, total_yearly_interest, start_year)
 st.download_button(
     label="📄 Download as PDF",
     data=pdf_data,
