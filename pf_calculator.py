@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from fpdf import FPDF
-import base64
 from io import BytesIO
 
 # --- Page Configuration ---
@@ -9,18 +8,18 @@ st.set_page_config(page_title="PF Ledger Calculator", layout="wide")
 
 st.title("💰 Provident Fund Ledger Calculator")
 st.markdown("""
-This application replicates the 'Integrated Formula' logic from your Excel file. 
-Enter your details below to generate the ledger, calculate interest, and export reports.
+**Shyambazar D.N. High School Format**
+This application replicates the manual ledger logic, including **P.F.L.R (Loan Recovery)**.
 """)
 
 # --- Sidebar: Initial Settings ---
 st.sidebar.header("Configuration")
-opening_balance_input = st.sidebar.number_input("Opening Balance (as of 1st April)", min_value=0.0, value=0.0, step=1000.0)
+opening_balance_input = st.sidebar.number_input("Opening Balance (as of 1st April)", min_value=0.0, value=21880982.0, step=1000.0, format="%.2f")
 default_rate = st.sidebar.number_input("Default Interest Rate (% per annum)", min_value=0.0, value=7.1, step=0.1)
 
 # --- Main Data Entry ---
 st.subheader("Monthly Entries")
-st.info("Enter your deposits and withdrawals for each month below. The 'Rate' column can be edited if interest changes mid-year.")
+st.info("Enter Deposits, P.F.L.R (Loan Recovery), and Withdrawals below.")
 
 # Initialize the data structure for 12 months (Apr to Mar)
 months = ["APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "JAN", "FEB", "MAR"]
@@ -31,18 +30,20 @@ if 'input_data' not in st.session_state:
         "Month": months,
         "Dep_Before_15": [0.0] * 12,
         "Dep_After_15": [0.0] * 12,
+        "PFLR": [0.0] * 12,  # <--- Added PFLR Column
         "Withdrawal": [0.0] * 12,
         "Rate": [default_rate] * 12
     }
     st.session_state.input_data = pd.DataFrame(data)
 
-# Data Editor (allows user to edit the table like Excel)
+# Data Editor
 edited_df = st.data_editor(
     st.session_state.input_data,
     column_config={
         "Month": st.column_config.TextColumn("Month", disabled=True),
         "Dep_Before_15": st.column_config.NumberColumn("Deposit (Within 15th)", format="₹ %.2f"),
         "Dep_After_15": st.column_config.NumberColumn("Deposit (After 15th)", format="₹ %.2f"),
+        "PFLR": st.column_config.NumberColumn("P.F.L.R (Recovery)", format="₹ %.2f"), # <--- Configured PFLR
         "Withdrawal": st.column_config.NumberColumn("Withdrawal", format="₹ %.2f"),
         "Rate": st.column_config.NumberColumn("Interest Rate (%)", format="%.2f")
     },
@@ -61,27 +62,27 @@ def calculate_ledger(opening_bal, input_df):
         month = row['Month']
         dep_before = row['Dep_Before_15']
         dep_after = row['Dep_After_15']
+        pflr = row['PFLR']  # <--- Get PFLR value
         withdrawal = row['Withdrawal']
         rate = row['Rate']
 
         # Logic: Lowest Balance for Interest = Opening + Dep (Before 15th) - Withdrawal
-        # Note: If Withdrawal > (Opening + Dep_Before), Lowest Balance is 0 (cannot be negative for interest)
+        # Note: Based on the image, PFLR does NOT increase the Lowest Balance for the current month.
         lowest_bal_calc = current_bal + dep_before - withdrawal
         lowest_bal = max(0, lowest_bal_calc)
 
         # Logic: Monthly Interest = (Lowest Balance * Rate) / 1200
-        # Rounded to nearest integer as per standard PF practice
         interest = round((lowest_bal * rate) / 1200)
         
-        # Logic: Closing Balance for the month = Opening + All Deposits - Withdrawal
-        # (Interest is usually credited at year-end, not added to monthly closing immediately)
-        closing_bal = current_bal + dep_before + dep_after - withdrawal
+        # Logic: Closing Balance = Opening + All Deposits + PFLR - Withdrawal
+        closing_bal = current_bal + dep_before + dep_after + pflr - withdrawal
 
         results.append({
             "Month": month,
             "Opening Balance": current_bal,
             "Dep (<15th)": dep_before,
             "Dep (>15th)": dep_after,
+            "PFLR": pflr, # <--- Added to results
             "Withdrawal": withdrawal,
             "Lowest Balance": lowest_bal,
             "Rate (%)": rate,
@@ -104,6 +105,7 @@ st.dataframe(result_df.style.format({
     "Opening Balance": "₹ {:.2f}",
     "Dep (<15th)": "₹ {:.2f}",
     "Dep (>15th)": "₹ {:.2f}",
+    "PFLR": "₹ {:.2f}",
     "Withdrawal": "₹ {:.2f}",
     "Lowest Balance": "₹ {:.2f}",
     "Interest": "₹ {:.2f}",
@@ -128,7 +130,7 @@ def to_excel(df):
         workbook = writer.book
         worksheet = writer.sheets['PF_Ledger']
         format1 = workbook.add_format({'num_format': '₹ #,##0.00'})
-        worksheet.set_column('B:I', 18, format1) # Format money columns
+        worksheet.set_column('B:J', 18, format1) # Adjusted for extra column
     processed_data = output.getvalue()
     return processed_data
 
@@ -153,37 +155,44 @@ class PDF(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def to_pdf(df, final_bal, tot_int):
-    pdf = PDF(orientation='L') # Landscape for wide table
+    pdf = PDF(orientation='L') 
     pdf.add_page()
-    pdf.set_font("Arial", size=10)
+    pdf.set_font("Arial", size=9)
+    
+    # Define Columns and Widths (Adjusted for PFLR)
+    # Month, Open, Dep<15, Dep>15, PFLR, With, Low, Rate, Int, Close
+    cols = ["Month", "Opening", "<15th", ">15th", "PFLR", "Withdr", "Lowest", "Rt", "Int", "Closing"]
+    # Map dataframe columns to short names for header
+    df_cols = df.columns.tolist() 
+    
+    # Widths (Total approx 275 for Landscape A4 safe area)
+    col_widths = [15, 30, 22, 22, 22, 22, 30, 12, 20, 30] 
     
     # Table Header
-    cols = df.columns.tolist()
-    col_widths = [15, 30, 25, 25, 25, 30, 20, 20, 30] # Adjust widths
-    
-    pdf.set_font("Arial", 'B', 9)
+    pdf.set_font("Arial", 'B', 8)
     for i, col in enumerate(cols):
         pdf.cell(col_widths[i], 10, col, 1, 0, 'C')
     pdf.ln()
     
     # Table Rows
-    pdf.set_font("Arial", size=9)
+    pdf.set_font("Arial", size=8)
     for index, row in df.iterrows():
         pdf.cell(col_widths[0], 10, str(row['Month']), 1)
-        pdf.cell(col_widths[1], 10, f"{row['Opening Balance']:.2f}", 1)
-        pdf.cell(col_widths[2], 10, f"{row['Dep (<15th)']:.2f}", 1)
-        pdf.cell(col_widths[3], 10, f"{row['Dep (>15th)']:.2f}", 1)
-        pdf.cell(col_widths[4], 10, f"{row['Withdrawal']:.2f}", 1)
-        pdf.cell(col_widths[5], 10, f"{row['Lowest Balance']:.2f}", 1)
-        pdf.cell(col_widths[6], 10, str(row['Rate (%)']), 1)
-        pdf.cell(col_widths[7], 10, f"{row['Interest']:.2f}", 1)
-        pdf.cell(col_widths[8], 10, f"{row['Closing Balance']:.2f}", 1)
+        pdf.cell(col_widths[1], 10, f"{row['Opening Balance']:.0f}", 1)
+        pdf.cell(col_widths[2], 10, f"{row['Dep (<15th)']:.0f}", 1)
+        pdf.cell(col_widths[3], 10, f"{row['Dep (>15th)']:.0f}", 1)
+        pdf.cell(col_widths[4], 10, f"{row['PFLR']:.0f}", 1)  # <--- PFLR in PDF
+        pdf.cell(col_widths[5], 10, f"{row['Withdrawal']:.0f}", 1)
+        pdf.cell(col_widths[6], 10, f"{row['Lowest Balance']:.0f}", 1)
+        pdf.cell(col_widths[7], 10, str(row['Rate (%)']), 1)
+        pdf.cell(col_widths[8], 10, f"{row['Interest']:.0f}", 1)
+        pdf.cell(col_widths[9], 10, f"{row['Closing Balance']:.0f}", 1)
         pdf.ln()
 
     pdf.ln(10)
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, f"Total Interest for the Year: {tot_int:,.2f}", 0, 1)
-    pdf.cell(0, 10, f"Final Balance (Principal + Interest): {final_bal:,.2f}", 0, 1)
+    pdf.cell(0, 10, f"Total Interest: {tot_int:,.2f}", 0, 1)
+    pdf.cell(0, 10, f"Final Balance: {final_bal:,.2f}", 0, 1)
     
     return pdf.output(dest='S').encode('latin-1')
 
